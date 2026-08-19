@@ -63,14 +63,24 @@ const PIPE_INTERVAL = 1.5;   // seconds between spawns
 const GROUND_H = 96;
 const BIRD_R = 17;
 
-// Mattress lines — pillar colors sampled from each mattress's quilting fabric
+// Mattress lines — pillar textures cropped straight from each mattress's quilting fabric,
+// with a binding color sampled from that mattress's edge tape for the caps/outline.
 const MATTRESSES = [
-  { name: 'RESTO',  base: '#9a9290', dark: '#6e6663', light: '#b7afa9' },
-  { name: 'SOVA',   base: '#e9cbb2', dark: '#b98f6c', light: '#f5e3d2' },
-  { name: 'LUMA',   base: '#c9cdd0', dark: '#2e8a99', light: '#e2e5e7' },
-  { name: 'ULTIMA', base: '#f0e9dc', dark: '#c2a06c', light: '#faf6ef' },
-  { name: 'RIVA',   base: '#efefec', dark: '#a8a8a2', light: '#fafaf9' },
+  { name: 'RESTO',  tex: 'textures/resto.jpg',  base: '#9a9290', dark: '#6e6663' },
+  { name: 'SOVA',   tex: 'textures/sova.jpg',   base: '#e9cbb2', dark: '#b98f6c' },
+  { name: 'LUMA',   tex: 'textures/luma.jpg',   base: '#c9cdd0', dark: '#2e8a99' },
+  { name: 'ULTIMA', tex: 'textures/ultima.jpg', base: '#f0e9dc', dark: '#c2a06c' },
+  { name: 'RIVA',   tex: 'textures/riva.jpg',   base: '#efefec', dark: '#a8a8a2' },
 ];
+for (const m of MATTRESSES) {
+  const img = new Image();
+  img.onload = () => {
+    const pat = ctx.createPattern(img, 'repeat');
+    if (pat.setTransform) pat.setTransform(new DOMMatrix().scale(0.42));
+    m.pattern = pat;
+  };
+  img.src = m.tex;
+}
 
 // ---- State ----
 const STATE = { READY: 0, PLAY: 1, DEAD: 2 };
@@ -213,28 +223,6 @@ function drawBackground() {
   }
 }
 
-function drawQuilting(x, y, w, h, dark) {
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(x, y, w, h);
-  ctx.clip();
-  ctx.strokeStyle = dark;
-  ctx.globalAlpha = 0.25;
-  ctx.lineWidth = 1.5;
-  const step = 18;
-  for (let d = -h; d < w + h; d += step) {
-    ctx.beginPath();
-    ctx.moveTo(x + d, y);
-    ctx.lineTo(x + d + h, y + h);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(x + d, y + h);
-    ctx.lineTo(x + d + h, y);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
 function drawMattressLabel(name, x, y, h) {
   if (h < 40) return;
   ctx.save();
@@ -254,46 +242,43 @@ function drawMattressLabel(name, x, y, h) {
 function drawPipe(p) {
   const capH = 26, capOver = 5;
   const m = p.mattress;
-  const bodyGrad = ctx.createLinearGradient(p.x, 0, p.x + PIPE_W, 0);
-  bodyGrad.addColorStop(0, m.dark);
-  bodyGrad.addColorStop(0.3, m.base);
-  bodyGrad.addColorStop(0.75, m.base);
-  bodyGrad.addColorStop(1, m.dark);
-
   const topH = p.top - capH;
   const by = p.top + GAP;
   const botY = by + capH;
   const botH = H - GROUND_H - botY;
 
-  // top pipe
-  ctx.fillStyle = bodyGrad;
-  ctx.fillRect(p.x, 0, PIPE_W, topH);
-  ctx.fillRect(p.x - capOver, p.top - capH, PIPE_W + capOver * 2, capH);
-  // bottom pipe
-  ctx.fillStyle = bodyGrad;
-  ctx.fillRect(p.x, botY, PIPE_W, botH);
-  ctx.fillRect(p.x - capOver, by, PIPE_W + capOver * 2, capH);
+  ctx.save();
+  // draw in the pillar's own local space so the fabric pattern stays fixed to the
+  // pillar (like a wrapped panel) instead of sliding as it scrolls across the world
+  ctx.translate(p.x, 0);
 
-  // quilted texture
-  drawQuilting(p.x, 0, PIPE_W, topH, m.dark);
-  drawQuilting(p.x, botY, PIPE_W, botH, m.dark);
+  ctx.fillStyle = m.pattern || m.base;
+  ctx.fillRect(0, 0, PIPE_W, topH);
+  ctx.fillRect(0, botY, PIPE_W, botH);
+
+  // binding tape at the cap edges, matching the real mattress trim color
+  ctx.fillStyle = m.dark;
+  ctx.fillRect(-capOver, p.top - capH, PIPE_W + capOver * 2, capH);
+  ctx.fillRect(-capOver, by, PIPE_W + capOver * 2, capH);
 
   // strong dark outlines for readability against the sky
   ctx.strokeStyle = m.dark;
   ctx.lineWidth = 3;
-  ctx.strokeRect(p.x, 0, PIPE_W, topH);
-  ctx.strokeRect(p.x - capOver, p.top - capH, PIPE_W + capOver * 2, capH);
-  ctx.strokeRect(p.x, botY, PIPE_W, botH);
-  ctx.strokeRect(p.x - capOver, by, PIPE_W + capOver * 2, capH);
+  ctx.strokeRect(0, 0, PIPE_W, topH);
+  ctx.strokeRect(-capOver, p.top - capH, PIPE_W + capOver * 2, capH);
+  ctx.strokeRect(0, botY, PIPE_W, botH);
+  ctx.strokeRect(-capOver, by, PIPE_W + capOver * 2, capH);
 
-  // highlight
-  ctx.fillStyle = 'rgba(255,255,255,0.3)';
-  ctx.fillRect(p.x + 6, 0, 6, topH);
-  ctx.fillRect(p.x + 6, botY, 6, botH);
+  // soft sheen so the fabric still reads as a rounded pillar
+  ctx.fillStyle = 'rgba(255,255,255,0.16)';
+  ctx.fillRect(6, 0, 6, topH);
+  ctx.fillRect(6, botY, 6, botH);
 
   // mattress name labels
-  drawMattressLabel(m.name, p.x + PIPE_W / 2, 0, topH);
-  drawMattressLabel(m.name, p.x + PIPE_W / 2, botY, botH);
+  drawMattressLabel(m.name, PIPE_W / 2, 0, topH);
+  drawMattressLabel(m.name, PIPE_W / 2, botY, botH);
+
+  ctx.restore();
 }
 
 function drawGround() {

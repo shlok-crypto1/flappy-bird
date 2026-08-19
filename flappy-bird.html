@@ -63,11 +63,20 @@ const PIPE_INTERVAL = 1.5;   // seconds between spawns
 const GROUND_H = 96;
 const BIRD_R = 17;
 
+// Mattress lines — pillar colors sampled from each mattress's quilting fabric
+const MATTRESSES = [
+  { name: 'RESTO',  base: '#9a9290', dark: '#6e6663', light: '#b7afa9' },
+  { name: 'SOVA',   base: '#e9cbb2', dark: '#b98f6c', light: '#f5e3d2' },
+  { name: 'LUMA',   base: '#c9cdd0', dark: '#2e8a99', light: '#e2e5e7' },
+  { name: 'ULTIMA', base: '#f0e9dc', dark: '#c2a06c', light: '#faf6ef' },
+  { name: 'RIVA',   base: '#efefec', dark: '#a8a8a2', light: '#fafaf9' },
+];
+
 // ---- State ----
 const STATE = { READY: 0, PLAY: 1, DEAD: 2 };
 let state = STATE.READY;
 let score = 0, best = 0;
-let bird, pipes, spawnTimer, groundX, flashAlpha;
+let bird, pipes, spawnTimer, groundX, flashAlpha, mattressCounter;
 let lastT = 0;
 
 function reset() {
@@ -77,6 +86,7 @@ function reset() {
   groundX = 0;
   flashAlpha = 0;
   score = 0;
+  mattressCounter = 0;
 }
 reset();
 
@@ -91,7 +101,9 @@ function spawnPipe() {
   const minTop = margin;
   const maxTop = H - GROUND_H - GAP - margin;
   const top = minTop + Math.random() * (maxTop - minTop);
-  pipes.push({ x: W + PIPE_W, top: top, scored: false });
+  const mattress = MATTRESSES[mattressCounter % MATTRESSES.length];
+  mattressCounter++;
+  pipes.push({ x: W + PIPE_W, top: top, scored: false, mattress: mattress });
 }
 
 // ---- Input ----
@@ -201,35 +213,87 @@ function drawBackground() {
   }
 }
 
+function drawQuilting(x, y, w, h, dark) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+  ctx.strokeStyle = dark;
+  ctx.globalAlpha = 0.25;
+  ctx.lineWidth = 1.5;
+  const step = 18;
+  for (let d = -h; d < w + h; d += step) {
+    ctx.beginPath();
+    ctx.moveTo(x + d, y);
+    ctx.lineTo(x + d + h, y + h);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + d, y + h);
+    ctx.lineTo(x + d + h, y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawMattressLabel(name, x, y, h) {
+  if (h < 40) return;
+  ctx.save();
+  ctx.translate(x, y + h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.font = "bold 15px 'Trebuchet MS', sans-serif";
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(74,59,18,0.55)';
+  ctx.fillStyle = '#fff';
+  ctx.strokeText(name, 0, 0);
+  ctx.fillText(name, 0, 0);
+  ctx.restore();
+}
+
 function drawPipe(p) {
   const capH = 26, capOver = 5;
+  const m = p.mattress;
   const bodyGrad = ctx.createLinearGradient(p.x, 0, p.x + PIPE_W, 0);
-  bodyGrad.addColorStop(0, '#5aa832');
-  bodyGrad.addColorStop(0.3, '#7ec84a');
-  bodyGrad.addColorStop(0.75, '#5aa832');
-  bodyGrad.addColorStop(1, '#3f7d22');
+  bodyGrad.addColorStop(0, m.dark);
+  bodyGrad.addColorStop(0.3, m.base);
+  bodyGrad.addColorStop(0.75, m.base);
+  bodyGrad.addColorStop(1, m.dark);
+
+  const topH = p.top - capH;
+  const by = p.top + GAP;
+  const botY = by + capH;
+  const botH = H - GROUND_H - botY;
 
   // top pipe
   ctx.fillStyle = bodyGrad;
-  ctx.fillRect(p.x, 0, PIPE_W, p.top - capH);
+  ctx.fillRect(p.x, 0, PIPE_W, topH);
   ctx.fillRect(p.x - capOver, p.top - capH, PIPE_W + capOver * 2, capH);
   // bottom pipe
-  const by = p.top + GAP;
   ctx.fillStyle = bodyGrad;
-  ctx.fillRect(p.x, by + capH, PIPE_W, H - GROUND_H - (by + capH));
+  ctx.fillRect(p.x, botY, PIPE_W, botH);
   ctx.fillRect(p.x - capOver, by, PIPE_W + capOver * 2, capH);
 
-  // outlines
-  ctx.strokeStyle = '#3f7d22';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(p.x, 0, PIPE_W, p.top - capH);
+  // quilted texture
+  drawQuilting(p.x, 0, PIPE_W, topH, m.dark);
+  drawQuilting(p.x, botY, PIPE_W, botH, m.dark);
+
+  // strong dark outlines for readability against the sky
+  ctx.strokeStyle = m.dark;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(p.x, 0, PIPE_W, topH);
   ctx.strokeRect(p.x - capOver, p.top - capH, PIPE_W + capOver * 2, capH);
-  ctx.strokeRect(p.x, by + capH, PIPE_W, H - GROUND_H - (by + capH));
+  ctx.strokeRect(p.x, botY, PIPE_W, botH);
   ctx.strokeRect(p.x - capOver, by, PIPE_W + capOver * 2, capH);
+
   // highlight
-  ctx.fillStyle = 'rgba(255,255,255,0.25)';
-  ctx.fillRect(p.x + 6, 0, 6, p.top - capH);
-  ctx.fillRect(p.x + 6, by + capH, 6, H - GROUND_H - (by + capH));
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.fillRect(p.x + 6, 0, 6, topH);
+  ctx.fillRect(p.x + 6, botY, 6, botH);
+
+  // mattress name labels
+  drawMattressLabel(m.name, p.x + PIPE_W / 2, 0, topH);
+  drawMattressLabel(m.name, p.x + PIPE_W / 2, botY, botH);
 }
 
 function drawGround() {

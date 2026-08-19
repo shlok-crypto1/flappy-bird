@@ -66,7 +66,9 @@
     width: 100%;
     max-width: 360px;
     max-height: 100%;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     border-radius: 22px;
     background: linear-gradient(165deg, #8b5cf6 0%, #6d28d9 45%, #4c1d95 100%);
     box-shadow: 0 20px 50px rgba(0,0,0,0.45);
@@ -137,7 +139,8 @@
     align-items: flex-end;
     justify-content: center;
     gap: 14px;
-    margin: 18px 0 20px;
+    margin: 16px 0 18px;
+    flex: 0 0 auto;
   }
   .podiumSpot { text-align: center; width: 92px; }
   .podiumSpot .rankTag { font-size: 13px; color: rgba(255,255,255,0.75); margin-bottom: 4px; }
@@ -164,7 +167,17 @@
     flex-shrink: 0;
   }
 
-  .lbList { display: flex; flex-direction: column; gap: 8px; text-align: left; }
+  /* only the rankings scroll, so PLAY AGAIN stays reachable no matter how
+     many players are on the board */
+  .lbList {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    text-align: left;
+    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
   .lbRow {
     display: flex;
     align-items: center;
@@ -184,10 +197,14 @@
     font-size: 13px;
     color: rgba(255,255,255,0.75);
     min-height: 18px;
+    flex: 0 0 auto;
   }
 
+  #lbPlayAgain { margin-top: 14px; flex: 0 0 auto; }
+  .card h1, #lbPlayAgain, .linkBtn { flex: 0 0 auto; }
+
   .linkBtn {
-    margin-top: 14px;
+    margin-top: 10px;
     background: none;
     border: none;
     color: rgba(255,255,255,0.7);
@@ -218,6 +235,7 @@
       <div id="lbPodium" class="podium"></div>
       <div id="lbList" class="lbList"></div>
       <div id="lbMeta" class="lbMeta">Loading…</div>
+      <button id="lbPlayAgain" class="bigBtn">PLAY AGAIN</button>
       <button id="lbChangeName" class="linkBtn">change name</button>
     </div>
   </div>
@@ -260,11 +278,29 @@ const MATTRESSES = [
   { name: 'ULTIMA', tex: 'textures/ultima.jpg', base: '#f0e9dc', dark: '#c2a06c' },
   { name: 'RIVA',   tex: 'textures/riva.jpg',   base: '#efefec', dark: '#a8a8a2' },
 ];
+// A photo crop won't tile — its edges don't line up, so repeating it leaves
+// seams down the pole. Mirroring the tile into a 2x2 block makes every edge
+// meet its own reflection, which tiles cleanly. Doing it here rather than
+// shipping the mirrored image keeps the download ~4x smaller.
+function makeSeamlessPattern(img) {
+  const s = img.width;
+  const c = document.createElement('canvas');
+  c.width = c.height = s * 2;
+  const g = c.getContext('2d');
+  g.drawImage(img, 0, 0);
+  g.save(); g.translate(s * 2, 0); g.scale(-1, 1); g.drawImage(img, 0, 0); g.restore();
+  g.save(); g.translate(0, s * 2); g.scale(1, -1); g.drawImage(img, 0, 0); g.restore();
+  g.save(); g.translate(s * 2, s * 2); g.scale(-1, -1); g.drawImage(img, 0, 0); g.restore();
+  return c;
+}
+
 for (const m of MATTRESSES) {
   const img = new Image();
   img.onload = () => {
-    const pat = ctx.createPattern(img, 'repeat');
-    if (pat.setTransform) pat.setTransform(new DOMMatrix().scale(0.42));
+    const pat = ctx.createPattern(makeSeamlessPattern(img), 'repeat');
+    // The mirrored tile holds ~4 motifs across 256px, so half-scale puts a
+    // ~32px quilt motif on screen — about two repeats across a 74px pole.
+    if (pat.setTransform) pat.setTransform(new DOMMatrix().scale(0.5));
     m.pattern = pat;
   };
   img.src = m.tex;
@@ -295,7 +331,7 @@ function setPlayerName(n) { localStorage.setItem('fb_player_name', n); }
 
 async function submitScore(finalScore) {
   const name = getPlayerName();
-  if (!name || finalScore <= 0) return;
+  if (!name || finalScore <= 0) return false;
   const deviceId = getDeviceId();
   try {
     await fetch(`${SUPABASE_URL}/rest/v1/scores?on_conflict=device_id`, {
@@ -309,7 +345,11 @@ async function submitScore(finalScore) {
       body: JSON.stringify({ score: finalScore, name, updated_at: new Date().toISOString() }),
     });
     myRank = await fetchMyRank(finalScore);
-  } catch (e) { /* offline or unreachable — score just won't sync this round */ }
+    return true;
+  } catch (e) {
+    // offline or unreachable — score just won't sync this round
+    return false;
+  }
 }
 
 async function fetchLeaderboard(limit) {
@@ -391,6 +431,12 @@ async function openLeaderboard() {
 document.getElementById('lbBtn').addEventListener('click', openLeaderboard);
 document.getElementById('lbClose').addEventListener('click', () => {
   document.getElementById('lbPanel').classList.add('hidden');
+});
+document.getElementById('lbPlayAgain').addEventListener('click', () => {
+  document.getElementById('lbPanel').classList.add('hidden');
+  deathSeq++; // cancel any auto-open still pending from the last death
+  reset();
+  state = STATE.READY;
 });
 document.getElementById('lbChangeName').addEventListener('click', () => {
   document.getElementById('lbPanel').classList.add('hidden');
@@ -539,12 +585,23 @@ function update(dt) {
   }
 }
 
+let deathSeq = 0;
+
 function die() {
   state = STATE.DEAD;
   deadTimer = 0;
   flashAlpha = 0.7;
   myRank = null;
-  submitScore(score);
+
+  // Send the score, but hold the leaderboard back until the player has had a
+  // beat to see GAME OVER. Skip it if they've already restarted by then.
+  const thisDeath = ++deathSeq;
+  Promise.all([
+    submitScore(score),
+    new Promise(r => setTimeout(r, 1200)),
+  ]).then(() => {
+    if (thisDeath === deathSeq && state === STATE.DEAD) openLeaderboard();
+  });
 }
 
 // ---- Draw ----
@@ -584,6 +641,14 @@ function drawMattressLabel(name, x, y, h) {
   ctx.restore();
 }
 
+// Gradient coords are resolved against the transform in effect when it's painted,
+// so this is built once and lines up with whichever pole we've translated to.
+const poleShade = ctx.createLinearGradient(0, 0, PIPE_W, 0);
+poleShade.addColorStop(0, 'rgba(0,0,0,0.22)');
+poleShade.addColorStop(0.22, 'rgba(255,255,255,0.14)');
+poleShade.addColorStop(0.55, 'rgba(255,255,255,0.03)');
+poleShade.addColorStop(1, 'rgba(0,0,0,0.26)');
+
 function drawPipe(p) {
   const capH = 26, capOver = 5;
   const m = p.mattress;
@@ -614,10 +679,11 @@ function drawPipe(p) {
   ctx.strokeRect(0, botY, PIPE_W, botH);
   ctx.strokeRect(-capOver, by, PIPE_W + capOver * 2, capH);
 
-  // soft sheen so the fabric still reads as a rounded pillar
-  ctx.fillStyle = 'rgba(255,255,255,0.16)';
-  ctx.fillRect(6, 0, 6, topH);
-  ctx.fillRect(6, botY, 6, botH);
+  // round the pole with edge shading instead of a hard white stripe, so the
+  // quilting stays readable all the way across
+  ctx.fillStyle = poleShade;
+  ctx.fillRect(0, 0, PIPE_W, topH);
+  ctx.fillRect(0, botY, PIPE_W, botH);
 
   // mattress name labels
   drawMattressLabel(m.name, PIPE_W / 2, 0, topH);

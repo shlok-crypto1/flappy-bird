@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#4ec0ca">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>%F0%9F%90%A5</text></svg>">
 <title>Flappy Bird</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -11,30 +16,37 @@
     background: #1a1a2e;
     font-family: 'Trebuchet MS', 'Segoe UI', sans-serif;
     overflow: hidden;
+    /* stop pull-to-refresh and rubber-banding from firing mid-game */
+    overscroll-behavior: none;
     display: flex;
     align-items: center;
     justify-content: center;
     touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
   }
   #wrap {
     position: relative;
-    width: 100%;
-    max-width: 440px;
-    height: 100%;
-    max-height: 780px;
+    /* dvh tracks the address bar collapsing; vh doesn't */
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   canvas {
     display: block;
-    width: 100%;
-    height: 100%;
     background: #70c5ce;
     cursor: pointer;
+    /* the canvas owns every gesture on it — no scroll, no pinch, no double-tap zoom */
+    touch-action: none;
   }
 
   #lbBtn {
     position: absolute;
-    top: 12px;
-    right: 12px;
+    top: calc(12px + env(safe-area-inset-top));
+    right: calc(12px + env(safe-area-inset-right));
     z-index: 5;
     width: 44px;
     height: 44px;
@@ -49,15 +61,24 @@
     justify-content: center;
   }
   #lbBtn:active { transform: scale(0.94); }
+  /* keep it off the poles while a run is in progress */
+  #lbBtn.playing { opacity: 0; pointer-events: none; }
 
   .overlay {
     position: absolute;
-    inset: 0;
+    left: 0;
+    right: 0;
+    top: 0;
+    /* --vvh tracks the keyboard on iOS, where innerHeight does not change;
+       without it the card centres behind the keyboard */
+    height: var(--vvh, 100%);
     z-index: 10;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 22px;
+    padding-top: calc(22px + env(safe-area-inset-top));
+    padding-bottom: calc(22px + env(safe-area-inset-bottom));
     background: rgba(10, 6, 30, 0.55);
   }
   .overlay.hidden { display: none; }
@@ -255,20 +276,59 @@
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 
-// Logical resolution (game world). We scale the canvas backing store to device pixels.
-const W = 440, H = 780;
-let scale = 1;
+// Logical resolution (game world).
+//
+// Height is fixed: gap size and fall distance are what make the game hard, so
+// every phone must share them or the leaderboard isn't comparing like with
+// like. Width follows the phone's aspect ratio instead, which lets the canvas
+// fill the screen at a single uniform scale — stretching one axis to fit was
+// squashing the bird by up to 18% on tall handsets.
+const H = 780;
+const W_MIN = 320, W_MAX = 560;
+let W = 440;
+
+// Android shrinks innerHeight when the keyboard opens. Measuring that squat
+// viewport would snap the world to its widest clamp mid-typing, so remember the
+// keyboard-free height and keep using it while an input has focus. Skipping the
+// resize outright doesn't work — the auto-focused name field would then freeze
+// the very first sizing.
+let fullVH = window.innerHeight;
 
 function resize() {
-  const wrap = document.getElementById('wrap');
-  const rect = wrap.getBoundingClientRect();
+  const vw = window.innerWidth;
+  let vh = window.innerHeight;
+  const typing = document.activeElement && document.activeElement.tagName === 'INPUT';
+  if (typing && vh < fullVH) vh = fullVH;
+  else fullVH = vh;
+
+  W = Math.round(Math.min(W_MAX, Math.max(W_MIN, H * (vw / vh))));
+
+  // one scale for both axes, so nothing distorts; letterboxes only at the
+  // clamp limits (a phone held sideways)
+  const scale = Math.min(vw / W, vh / H);
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = W * dpr;
-  canvas.height = H * dpr;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  canvas.style.width = Math.round(W * scale) + 'px';
+  canvas.style.height = Math.round(H * scale) + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(() => {
+  fullVH = window.innerHeight; // the remembered height belongs to the old orientation
+  resize();
+}, 150));
 resize();
+
+// Keep the dialogs inside the area the keyboard leaves visible. iOS reports
+// this only through visualViewport — innerHeight stays at the full height.
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const trackViewport = () =>
+    document.documentElement.style.setProperty('--vvh', vv.height + 'px');
+  vv.addEventListener('resize', trackViewport);
+  trackViewport();
+}
 
 // ---- Game constants ----
 const GRAVITY = 1500;        // px/s^2
@@ -378,14 +438,27 @@ function setPlayerName(n) { localStorage.setItem('fb_player_name', n); }
 // Writes go through database functions rather than straight at the table, so
 // the name check and the claim happen in one step — two people racing for the
 // same name can't both win it.
-async function rpc(fn, body) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+// Phone networks drop out mid-request and a plain fetch will sit there for
+// minutes. Every call gets a deadline so the game never hangs waiting on one.
+const NET_TIMEOUT = 8000;
+
+async function fetchJson(url, opts = {}) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), NET_TIMEOUT);
+  try {
+    const res = await fetch(url, { ...opts, headers: sbHeaders, signal: ac.signal });
+    if (!res.ok) throw new Error(url + ' -> ' + res.status);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function rpc(fn, body) {
+  return fetchJson(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
     method: 'POST',
-    headers: sbHeaders,
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(fn + ' failed: ' + res.status);
-  return res.json();
 }
 
 // 'ok' | 'taken' | 'invalid'
@@ -406,11 +479,9 @@ async function submitScore(finalScore) {
 }
 
 async function fetchLeaderboard(limit) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/leaderboard?select=name,score&limit=${limit}`, {
-    headers: sbHeaders,
-  });
-  if (!res.ok) throw new Error('leaderboard fetch failed');
-  return res.json();
+  // order explicitly: Postgres does not promise a view's own ORDER BY survives
+  // an outer LIMIT, so without this the top 20 could be the wrong 20
+  return fetchJson(`${SUPABASE_URL}/rest/v1/leaderboard?select=name,score&order=score.desc&limit=${limit}`);
 }
 
 let myRank = null;
@@ -462,6 +533,10 @@ async function openLeaderboard() {
     const mineIdx = rows.findIndex(isMe);
     if (mineIdx >= 0) {
       metaEl.textContent = `You're #${mineIdx + 1} with ${rows[mineIdx].score}`;
+      // your own row is the one you opened this to see — don't make them hunt
+      // for it down a scrolled list
+      const meRow = listEl.querySelector('.lbRow.me');
+      if (meRow) meRow.scrollIntoView({ block: 'center' });
     } else if (best > 0) {
       const rank = await rpc('my_rank', { p_device: getDeviceId() });
       metaEl.textContent = rank ? `You're #${rank} with ${best} (play more to crack the top 20!)` : `Your best is ${best}`;
@@ -473,7 +548,8 @@ async function openLeaderboard() {
   }
 }
 
-document.getElementById('lbBtn').addEventListener('click', openLeaderboard);
+const lbBtn = document.getElementById('lbBtn');
+lbBtn.addEventListener('click', openLeaderboard);
 document.getElementById('lbClose').addEventListener('click', () => {
   document.getElementById('lbPanel').classList.add('hidden');
 });
@@ -540,6 +616,8 @@ async function confirmName() {
 nameSubmitBtn.addEventListener('click', confirmName);
 nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') confirmName(); });
 nameInput.addEventListener('input', () => setNameError(''));
+// the keyboard closing frees up viewport again
+nameInput.addEventListener('blur', () => setTimeout(resize, 100));
 
 // Re-assert the stored name on load: it confirms the row still exists and
 // catches the case where this name got claimed elsewhere first. The modal
@@ -612,15 +690,28 @@ function flap() {
     bird.v = FLAP_V;
   } else if (state === STATE.PLAY) {
     bird.v = FLAP_V;
-  } else if (state === STATE.DEAD) {
-    // brief cooldown so you don't instantly restart on the death tap
-    if (deadTimer > 0.6) { reset(); state = STATE.READY; }
   }
+  // DEAD is handled by the leaderboard's PLAY AGAIN button. Restarting on a
+  // stray tap here used to race the board and skip it entirely.
 }
 let deadTimer = 0;
 
-canvas.addEventListener('mousedown', e => { e.preventDefault(); flap(); });
-canvas.addEventListener('touchstart', e => { e.preventDefault(); flap(); }, { passive: false });
+// A tap can raise touchstart *and* a synthesised mousedown, which would flap
+// twice and send the bird up at double strength. Once a touch is seen, ignore
+// mouse events entirely.
+let touchSeen = false;
+canvas.addEventListener('touchstart', e => {
+  touchSeen = true;
+  e.preventDefault();
+  flap();
+}, { passive: false });
+canvas.addEventListener('mousedown', e => {
+  if (touchSeen) return;
+  e.preventDefault();
+  flap();
+});
+// long-press on the canvas shouldn't raise the OS text/image menu
+canvas.addEventListener('contextmenu', e => e.preventDefault());
 window.addEventListener('keydown', e => {
   if (inputBlocked()) return;
   if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); flap(); }
@@ -628,6 +719,10 @@ window.addEventListener('keydown', e => {
 
 // ---- Update ----
 function update(dt) {
+  // the world's width follows the viewport, so keep the bird anchored across
+  // an orientation change or the address bar collapsing
+  bird.x = W * 0.30;
+
   // ground scroll always animates
   groundX = (groundX - PIPE_SPEED * dt) % 24;
   // clouds drift
@@ -935,15 +1030,8 @@ function draw() {
     ctx.font = "16px 'Trebuchet MS', sans-serif";
     ctx.textAlign = 'center';
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    const rankTxt = (!getPlayerName() || score <= 0) ? '' : myRank ? `Global rank #${myRank} — tap 🏆 to see the board` : 'Syncing rank…';
+    const rankTxt = (!getPlayerName() || score <= 0) ? '' : myRank ? `Global rank #${myRank}` : 'Syncing rank…';
     if (rankTxt) ctx.fillText(rankTxt, W / 2, H * 0.40 + 172);
-
-    if (deadTimer > 0.6) {
-      const pulse = 0.6 + Math.sin(performance.now() / 250) * 0.4;
-      ctx.globalAlpha = pulse;
-      drawText('TAP TO PLAY AGAIN', W / 2, H * 0.66, 24, '#fff', '#2c6b70');
-      ctx.globalAlpha = 1;
-    }
   }
 }
 
@@ -955,6 +1043,7 @@ function loop(t) {
   if (dt > 0.05) dt = 0.05; // clamp after tab switches
   // browser zoom or a move to another monitor changes pixel density
   if ((window.devicePixelRatio || 1) !== patternDpr) buildPatterns();
+  lbBtn.classList.toggle('playing', state === STATE.PLAY);
   update(dt);
   draw();
   requestAnimationFrame(loop);

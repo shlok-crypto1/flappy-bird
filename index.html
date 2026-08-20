@@ -94,7 +94,7 @@
     width: 100%;
     padding: 12px 14px;
     border-radius: 12px;
-    border: none;
+    border: 2px solid transparent;
     outline: none;
     font-size: 16px;
     text-align: center;
@@ -102,6 +102,16 @@
     background: rgba(255,255,255,0.92);
     color: #3b2266;
   }
+  #nameInput.invalid { border-color: #ff9d9d; }
+
+  .formError {
+    font-size: 13px;
+    line-height: 1.35;
+    color: #ffc9c9;
+    margin: -6px 0 12px;
+    min-height: 0;
+  }
+  .formError:empty { margin: 0; }
 
   .bigBtn {
     width: 100%;
@@ -224,6 +234,7 @@
       <h1>FLAPPY BIRD</h1>
       <p>Enter your name to join the leaderboard</p>
       <input id="nameInput" maxlength="16" placeholder="Your name" autocomplete="off" />
+      <div id="nameError" class="formError"></div>
       <button id="nameSubmit" class="bigBtn">PLAY</button>
     </div>
   </div>
@@ -364,22 +375,29 @@ function getDeviceId() {
 function getPlayerName() { return localStorage.getItem('fb_player_name') || ''; }
 function setPlayerName(n) { localStorage.setItem('fb_player_name', n); }
 
+// Writes go through database functions rather than straight at the table, so
+// the name check and the claim happen in one step — two people racing for the
+// same name can't both win it.
+async function rpc(fn, body) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: sbHeaders,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(fn + ' failed: ' + res.status);
+  return res.json();
+}
+
+// 'ok' | 'taken' | 'invalid'
+function claimName(name) {
+  return rpc('claim_name', { p_device: getDeviceId(), p_name: name });
+}
+
 async function submitScore(finalScore) {
-  const name = getPlayerName();
-  if (!name || finalScore <= 0) return false;
-  const deviceId = getDeviceId();
+  if (!getPlayerName() || finalScore <= 0) return false;
   try {
-    await fetch(`${SUPABASE_URL}/rest/v1/scores?on_conflict=device_id`, {
-      method: 'POST',
-      headers: { ...sbHeaders, Prefer: 'resolution=ignore-duplicates,return=minimal' },
-      body: JSON.stringify({ device_id: deviceId, name, score: finalScore }),
-    });
-    await fetch(`${SUPABASE_URL}/rest/v1/scores?device_id=eq.${deviceId}&score=lt.${finalScore}`, {
-      method: 'PATCH',
-      headers: { ...sbHeaders, Prefer: 'return=minimal' },
-      body: JSON.stringify({ score: finalScore, name, updated_at: new Date().toISOString() }),
-    });
-    myRank = await fetchMyRank(finalScore);
+    await rpc('submit_score', { p_device: getDeviceId(), p_score: finalScore });
+    myRank = await rpc('my_rank', { p_device: getDeviceId() });
     return true;
   } catch (e) {
     // offline or unreachable — score just won't sync this round
@@ -388,20 +406,11 @@ async function submitScore(finalScore) {
 }
 
 async function fetchLeaderboard(limit) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/scores?select=device_id,name,score&order=score.desc&limit=${limit}`, {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/leaderboard?select=name,score&limit=${limit}`, {
     headers: sbHeaders,
   });
   if (!res.ok) throw new Error('leaderboard fetch failed');
   return res.json();
-}
-
-async function fetchMyRank(myScore) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/scores?select=id&score=gt.${myScore}`, {
-    headers: { ...sbHeaders, Prefer: 'count=exact', Range: '0-0' },
-  });
-  const range = res.headers.get('content-range');
-  const total = range ? parseInt(range.split('/')[1], 10) : NaN;
-  return Number.isFinite(total) ? total + 1 : null;
 }
 
 let myRank = null;
@@ -421,7 +430,9 @@ async function openLeaderboard() {
 
   try {
     const rows = await fetchLeaderboard(20);
-    const deviceId = getDeviceId();
+    // names are unique now, so they identify the player on their own
+    const myName = getPlayerName().toLowerCase();
+    const isMe = r => myName && r.name.toLowerCase() === myName;
     const top3 = rows.slice(0, 3);
     const order = [1, 0, 2]; // render as 2nd, 1st, 3rd for the podium look
     for (const i of order) {
@@ -439,21 +450,20 @@ async function openLeaderboard() {
 
     rows.forEach((r, i) => {
       const row = document.createElement('div');
-      row.className = 'lbRow' + (r.device_id === deviceId ? ' me' : '');
+      row.className = 'lbRow' + (isMe(r) ? ' me' : '');
       row.innerHTML = `
         <div class="rankNum">${i + 1}</div>
         <div class="avatar"></div>
-        <div class="rName">${escapeHtml(r.name)}${r.device_id === deviceId ? ' (you)' : ''}</div>
+        <div class="rName">${escapeHtml(r.name)}${isMe(r) ? ' (you)' : ''}</div>
         <div class="rScore">${r.score}</div>`;
       listEl.appendChild(row);
     });
 
-    const mine = rows.find(r => r.device_id === deviceId);
-    if (mine) {
-      const rank = rows.findIndex(r => r.device_id === deviceId) + 1;
-      metaEl.textContent = `You're #${rank} with ${mine.score}`;
+    const mineIdx = rows.findIndex(isMe);
+    if (mineIdx >= 0) {
+      metaEl.textContent = `You're #${mineIdx + 1} with ${rows[mineIdx].score}`;
     } else if (best > 0) {
-      const rank = await fetchMyRank(best);
+      const rank = await rpc('my_rank', { p_device: getDeviceId() });
       metaEl.textContent = rank ? `You're #${rank} with ${best} (play more to crack the top 20!)` : `Your best is ${best}`;
     } else {
       metaEl.textContent = 'Play a round to join the leaderboard!';
@@ -475,29 +485,85 @@ document.getElementById('lbPlayAgain').addEventListener('click', () => {
 });
 document.getElementById('lbChangeName').addEventListener('click', () => {
   document.getElementById('lbPanel').classList.add('hidden');
-  document.getElementById('nameInput').value = getPlayerName();
-  document.getElementById('nameModal').classList.remove('hidden');
+  openNameModal();
 });
 
 const nameModal = document.getElementById('nameModal');
 const nameInput = document.getElementById('nameInput');
 const nameSubmitBtn = document.getElementById('nameSubmit');
-function confirmName() {
-  const v = nameInput.value.trim().slice(0, 16);
-  if (!v) { nameInput.focus(); return; }
-  setPlayerName(v);
-  nameModal.classList.add('hidden');
+const nameErrorEl = document.getElementById('nameError');
+
+function setNameError(msg) {
+  nameErrorEl.textContent = msg;
+  nameInput.classList.toggle('invalid', !!msg);
 }
+
+function openNameModal(msg) {
+  nameInput.value = getPlayerName();
+  setNameError(msg || '');
+  nameModal.classList.remove('hidden');
+  setTimeout(() => { nameInput.focus(); nameInput.select(); }, 50);
+}
+
+async function confirmName() {
+  const v = nameInput.value.trim().slice(0, 16);
+  if (!v) { setNameError('Please enter a name.'); nameInput.focus(); return; }
+
+  setNameError('');
+  nameSubmitBtn.disabled = true;
+  nameSubmitBtn.textContent = 'CHECKING…';
+  try {
+    const result = await claimName(v);
+    if (result === 'taken') {
+      setNameError(`"${v}" is already taken. Please choose a different name.`);
+      nameInput.focus();
+      nameInput.select();
+      return;
+    }
+    if (result === 'invalid') {
+      setNameError('Names must be 1–16 characters.');
+      nameInput.focus();
+      return;
+    }
+    setPlayerName(v);
+    setNameError('');
+    nameModal.classList.add('hidden');
+  } catch (e) {
+    // without a confirmed claim the name isn't ours, so don't let play start
+    setNameError('Could not reach the leaderboard. Check your connection and try again.');
+  } finally {
+    nameSubmitBtn.disabled = false;
+    nameSubmitBtn.textContent = 'PLAY';
+  }
+}
+
 nameSubmitBtn.addEventListener('click', confirmName);
 nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') confirmName(); });
-if (getPlayerName()) {
-  nameInput.value = getPlayerName();
-} else {
-  nameModal.classList.remove('hidden');
-}
-if (!nameModal.classList.contains('hidden')) {
-  setTimeout(() => nameInput.focus(), 50);
-}
+nameInput.addEventListener('input', () => setNameError(''));
+
+// Re-assert the stored name on load: it confirms the row still exists and
+// catches the case where this name got claimed elsewhere first. The modal
+// stays up (and so play stays blocked) until the claim comes back.
+(async function restoreName() {
+  const saved = getPlayerName();
+  if (!saved) { openNameModal(); return; }
+
+  nameInput.value = saved;
+  nameSubmitBtn.disabled = true;
+  nameSubmitBtn.textContent = 'CHECKING…';
+  try {
+    if (await claimName(saved) === 'ok') {
+      nameModal.classList.add('hidden');
+      return;
+    }
+    openNameModal(`"${saved}" is now taken by another player. Please choose a different name.`);
+  } catch (e) {
+    openNameModal('Could not reach the leaderboard. Check your connection and try again.');
+  } finally {
+    nameSubmitBtn.disabled = false;
+    nameSubmitBtn.textContent = 'PLAY';
+  }
+})();
 
 // ---- State ----
 const STATE = { READY: 0, PLAY: 1, DEAD: 2 };

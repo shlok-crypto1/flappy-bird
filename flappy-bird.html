@@ -278,15 +278,19 @@ const MATTRESSES = [
   { name: 'ULTIMA', tex: 'textures/ultima.jpg', base: '#f0e9dc', dark: '#c2a06c' },
   { name: 'RIVA',   tex: 'textures/riva.jpg',   base: '#efefec', dark: '#a8a8a2' },
 ];
+// How wide one full quilt tile should appear on screen, in CSS pixels. The tile
+// holds ~4 motifs, so this puts a ~32px motif on a 74px pole.
+const TILE_CSS = 128;
+
 // A photo crop won't tile — its edges don't line up, so repeating it leaves
 // seams down the pole. Mirroring the tile into a 2x2 block makes every edge
-// meet its own reflection, which tiles cleanly. Doing it here rather than
-// shipping the mirrored image keeps the download ~4x smaller.
-function makeSeamlessPattern(img) {
+// meet its own reflection, which tiles cleanly.
+function makeSeamlessTile(img) {
   const s = img.width;
   const c = document.createElement('canvas');
   c.width = c.height = s * 2;
   const g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
   g.drawImage(img, 0, 0);
   g.save(); g.translate(s * 2, 0); g.scale(-1, 1); g.drawImage(img, 0, 0); g.restore();
   g.save(); g.translate(0, s * 2); g.scale(1, -1); g.drawImage(img, 0, 0); g.restore();
@@ -294,15 +298,46 @@ function makeSeamlessPattern(img) {
   return c;
 }
 
+// Canvas has no mipmaps, so shrinking a big tile in one jump aliases the weave
+// into moire. Halving repeatedly until we're within 2x keeps the stitching clean.
+function resampleTo(src, size) {
+  let cur = src;
+  while (cur.width > size * 2) {
+    const half = document.createElement('canvas');
+    half.width = half.height = Math.max(size, cur.width >> 1);
+    const g = half.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(cur, 0, 0, half.width, half.height);
+    cur = half;
+  }
+  if (cur.width === size) return cur;
+  const out = document.createElement('canvas');
+  out.width = out.height = size;
+  const g = out.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(cur, 0, 0, size, size);
+  return out;
+}
+
+// Build the fabric at the display's real pixel density so it lands 1:1 on the
+// panel instead of being stretched. Pattern space is CSS pixels (the context is
+// already scaled by dpr), so a tile of TILE_CSS*dpr drawn at 1/dpr is exact.
+let patternDpr = 0;
+function buildPatterns() {
+  const dpr = window.devicePixelRatio || 1;
+  const size = Math.round(TILE_CSS * dpr);
+  for (const m of MATTRESSES) {
+    if (!m.tile) continue;
+    const pat = ctx.createPattern(resampleTo(m.tile, size), 'repeat');
+    if (pat.setTransform) pat.setTransform(new DOMMatrix().scale(TILE_CSS / size));
+    m.pattern = pat;
+  }
+  patternDpr = dpr;
+}
+
 for (const m of MATTRESSES) {
   const img = new Image();
-  img.onload = () => {
-    const pat = ctx.createPattern(makeSeamlessPattern(img), 'repeat');
-    // The mirrored tile holds ~4 motifs across 256px, so half-scale puts a
-    // ~32px quilt motif on screen — about two repeats across a 74px pole.
-    if (pat.setTransform) pat.setTransform(new DOMMatrix().scale(0.5));
-    m.pattern = pat;
-  };
+  img.onload = () => { m.tile = makeSeamlessTile(img); buildPatterns(); };
   img.src = m.tex;
 }
 
@@ -625,16 +660,20 @@ function drawBackground() {
   }
 }
 
+const LABEL_SIZE = 26;
+
 function drawMattressLabel(name, x, y, h) {
-  if (h < 40) return;
+  // the name runs along the pole, so a short stub can't hold it legibly
+  if (h < 110) return;
   ctx.save();
   ctx.translate(x, y + h / 2);
   ctx.rotate(-Math.PI / 2);
-  ctx.font = "bold 15px 'Trebuchet MS', sans-serif";
+  ctx.font = `bold ${LABEL_SIZE}px 'Trebuchet MS', sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = 'rgba(74,59,18,0.55)';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = 'rgba(48,36,10,0.75)';
   ctx.fillStyle = '#fff';
   ctx.strokeText(name, 0, 0);
   ctx.fillText(name, 0, 0);
@@ -848,6 +887,8 @@ function loop(t) {
   let dt = (t - lastT) / 1000;
   lastT = t;
   if (dt > 0.05) dt = 0.05; // clamp after tab switches
+  // browser zoom or a move to another monitor changes pixel density
+  if ((window.devicePixelRatio || 1) !== patternDpr) buildPatterns();
   update(dt);
   draw();
   requestAnimationFrame(loop);
